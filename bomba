@@ -1,0 +1,91 @@
+// Define os pinos do buzzer e do visor de sete segmentos
+const int BUZZER_PIN = 9;
+const int SEGMENT_A_PIN = 2;
+const int SEGMENT_B_PIN = 3;
+const int SEGMENT_C_PIN = 4;
+const int SEGMENT_D_PIN = 5;
+const int SEGMENT_E_PIN = 6;
+const int SEGMENT_F_PIN = 7;
+const int SEGMENT_G_PIN = 8;
+
+// Define as constantes para o tempo de contagem regressiva
+const int COUNTDOWN_TIME = 10; // tempo em segundos
+const int COUNTDOWN_DELAY = 1000; // atraso em milissegundos
+
+void setup() {
+  // Define os pinos do visor de sete segmentos como saídas
+  pinMode(SEGMENT_A_PIN, OUTPUT);
+  pinMode(SEGMENT_B_PIN, OUTPUT);
+  pinMode(SEGMENT_C_PIN, OUTPUT);
+  pinMode(SEGMENT_D_PIN, OUTPUT);
+  pinMode(SEGMENT_E_PIN, OUTPUT);
+  pinMode(SEGMENT_F_PIN, OUTPUT);
+  pinMode(SEGMENT_G_PIN, OUTPUT);
+
+  // Define o pino do buzzer como saída
+  pinMode(BUZZER_PIN, OUTPUT);
+}
+
+void loop() {
+  // Inicia a contagem regressiva
+  for (int i = COUNTDOWN_TIME; i >= 0; i--) {
+    // Mostra o tempo restante no visor de sete segmentos
+    displayNumber(i);
+
+    // Toca o buzzer por um breve instante
+    tone(BUZZER_PIN, 2000, 100);
+
+    // Espera um segundo antes de continuar
+    delay(COUNTDOWN_DELAY);
+  }
+}
+
+void displayNumber(int num) {
+  // Mapeia os valores dos segmentos para o número correspondente
+  boolean segments[7];
+  switch (num) {
+    case 0:
+      segments[0] = true;
+      segments[1] = true;
+      segments[2] = true;
+      segments[3] = true;
+      segments[4] = true;
+      segments[5] = true;
+      segments[6] = false;
+      break;
+    case 1:
+      segments[0] = false;
+      segments[1] = true;
+      segments[2] = true;
+      segments[3] = false;
+      segments[4] = false;
+      segments[5] = false;
+      segments[6] = false;
+      break;
+    case 2:
+      segments[0] = true;
+      segments[1] = true;
+      segments[2] = false;
+      segments[3] = true;
+      segments[4] = true;
+      segments[5] = false;
+      segments[6] = true;
+      break;
+    case 3:
+      segments[0] = true;
+      segments[1] = true;
+      segments[2] = true;
+      segments[3] = true;
+      segments[4] = false;
+      segments[5] = false;
+      segments[6] = true;
+      break;
+    case 4:
+      segments[0] = false;
+      segments[1] = true;
+      segments[2] = true;
+      segments[3] = false;
+      segments[4] = false;
+      segments[5] = true;
+      segments[6] = false;
+  }}
