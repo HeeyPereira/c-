@@ -1,7 +1,7 @@
 // TODOS OS CODIGOS ESTÃO AQUI PRA FUNCIONAR 
 //FOI USADO Node.js v24.21.0 E LibreHardwareMonitor 
-// CODIGO DO SERVIDOR 
 
+// CODIGO DO SERVIDOR 
 
 const express = require("express");
 const path = require("path");
