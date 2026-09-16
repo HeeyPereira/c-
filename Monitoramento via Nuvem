@@ -1,0 +1,1434 @@
+// TODOS OS CODIGOS ESTÃO AQUI PRA FUNCIONAR 
+//FOI USADO Node.js v24.21.0 E LibreHardwareMonitor 
+// CODIGO DO SERVIDOR 
+
+
+const express = require("express");
+const path = require("path");
+const WebSocket = require("ws");
+const fs = require("fs");
+
+const app = express();
+const PORT = 3000;
+
+// ===============================
+// SITE
+// ===============================
+
+app.use(express.static(path.join(__dirname, "../site")));
+
+// ===============================
+// WALLPAPERS
+// ===============================
+
+app.use(
+    "/wallpapers",
+    express.static(path.join(__dirname, "../wallpapers"))
+);
+
+// Lista os wallpapers disponíveis
+app.get("/api/wallpapers", (req, res) => {
+
+    const pasta = path.join(__dirname, "../wallpapers");
+
+    fs.readdir(pasta, (erro, arquivos) => {
+
+        if (erro) {
+
+            return res.status(500).json({
+                erro: "Não foi possível ler os wallpapers."
+            });
+
+        }
+
+        const imagens = arquivos.filter((arquivo) => {
+
+            return /\.(jpg|jpeg|png|webp)$/i.test(arquivo);
+
+        });
+
+        res.json(imagens);
+    });
+});
+
+// ===============================
+// SERVIDOR
+// ===============================
+
+const server = app.listen(PORT, "0.0.0.0", () => {
+
+    console.log(
+        `Servidor rodando em http://localhost:${PORT}`
+    );
+
+});
+
+// ===============================
+// WEBSOCKET
+// ===============================
+
+const wss = new WebSocket.Server({ server });
+
+let dadosPC = {
+
+    cpu: 0,
+    ram: 0,
+    gpu: 0,
+    cpuTemp: null,
+    gpuTemp: null
+
+};
+
+wss.on("connection", (ws) => {
+
+    console.log("Nova conexão WebSocket.");
+
+    // Envia os dados atuais para quem acabou de conectar
+    ws.send(JSON.stringify(dadosPC));
+
+    ws.on("message", (message) => {
+
+        try {
+
+            const dados = JSON.parse(message);
+
+            dadosPC = dados;
+
+            console.log("Dados recebidos:", dados);
+
+            // Envia os dados para os clientes conectados
+            wss.clients.forEach((cliente) => {
+
+                if (cliente.readyState === WebSocket.OPEN) {
+
+                    cliente.send(JSON.stringify(dadosPC));
+
+                }
+
+            });
+
+        } catch (erro) {
+
+            console.log("Mensagem inválida.");
+
+        }
+
+    });
+
+    ws.on("close", () => {
+
+        console.log("Conexão encerrada.");
+
+    });
+
+});
+
+// CODIGO DO MONITORAMENTO 
+
+const si = require("systeminformation");
+const WebSocket = require("ws");
+const http = require("http");
+
+const WS_URL = "ws://localhost:3000";
+const LHM_URL = "http://localhost:8085/data.json";
+
+const ws = new WebSocket(WS_URL);
+
+ws.on("open", () => {
+    console.log("Monitor conectado ao servidor.");
+    monitorar();
+});
+
+ws.on("error", (erro) => {
+    console.log("Erro na conexão WebSocket:", erro.message);
+});
+
+// Busca a temperatura diretamente do servidor Web do LibreHardwareMonitor
+function obterTempViaLHM() {
+    return new Promise((resolve) => {
+        http.get(LHM_URL, (res) => {
+            let body = "";
+            res.on("data", (chunk) => (body += chunk));
+            res.on("end", () => {
+                try {
+                    const json = JSON.parse(body);
+                    const cpuTemp = extrairTempLHM(json);
+                    resolve(cpuTemp);
+                } catch (e) {
+                    resolve(null);
+                }
+            });
+        }).on("error", () => resolve(null));
+    });
+}
+
+// Navega pela estrutura do seu LibreHardwareMonitor específico
+function extrairTempLHM(node) {
+    if (!node) return null;
+
+    // Procura por "CPU" debaixo do grupo de Temperaturas (conforme a sua imagem)
+    if (
+        node.Text &&
+        (node.Text === "CPU" || node.Text.includes("CPU Package") || node.Text.includes("Core Average") || node.Text === "CPU Core") &&
+        node.Value &&
+        node.Value.includes("°C")
+    ) {
+        const valorNumerico = parseFloat(node.Value.replace(",", ".").replace("°C", "").trim());
+        if (!isNaN(valorNumerico) && valorNumerico > 0) {
+            return valorNumerico;
+        }
+    }
+
+    if (Array.isArray(node.Children)) {
+        for (const child of node.Children) {
+            const temp = extrairTempLHM(child);
+            if (temp !== null) return temp;
+        }
+    }
+
+    return null;
+}
+
+async function monitorar() {
+    try {
+        const cpu = await si.currentLoad();
+        const memoria = await si.mem();
+        const temperatura = await si.cpuTemperature();
+        const gpu = await si.graphics();
+
+        const ramUso = (memoria.used / memoria.total) * 100;
+
+        let gpuUso = null;
+        let gpuTemperatura = null;
+
+        if (gpu.controllers && gpu.controllers.length > 0) {
+            const placa = gpu.controllers.find(c => c.utilizationGpu !== undefined) || gpu.controllers[0];
+            gpuUso = placa.utilizationGpu ?? null;
+            gpuTemperatura = placa.temperatureGpu ?? null;
+        }
+
+        // Tenta ler do LibreHardwareMonitor aberto
+        let cpuTemp = await obterTempViaLHM();
+
+        // Fallback para biblioteca padrao
+        if (cpuTemp === null && temperatura && temperatura.main > 0) {
+            cpuTemp = temperatura.main;
+        }
+
+        const dados = {
+            cpu: Number(cpu.currentLoad.toFixed(1)),
+            ram: Number(ramUso.toFixed(1)),
+            gpu: gpuUso !== null ? Number(gpuUso.toFixed(1)) : null,
+            cpuTemp: cpuTemp !== null ? Number(cpuTemp.toFixed(1)) : null,
+            gpuTemp: gpuTemperatura !== null ? Number(gpuTemperatura.toFixed(1)) : null
+        };
+
+        console.clear();
+        console.log("===== PC MONITOR =====");
+        console.log(`CPU: ${dados.cpu}%`);
+        console.log(`CPU Temperatura: ${dados.cpuTemp !== null ? `${dados.cpuTemp} °C` : "N/D"}`);
+        console.log(`RAM: ${dados.ram}%`);
+        console.log(`GPU: ${dados.gpu !== null ? `${dados.gpu}%` : "N/D"}`);
+        console.log(`GPU Temperatura: ${dados.gpuTemp !== null ? `${dados.gpuTemp} °C` : "N/D"}`);
+
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(dados));
+        }
+
+    } catch (erro) {
+        console.log("Erro ao obter informações:", erro.message);
+    }
+}
+
+setInterval(monitorar, 2000);
+
+// GODIGO DO SITE 
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Monitoramento</title>
+
+<style>
+
+:root {
+    --card-scale: 1;
+    --clock-scale: 1;
+    --accent-color: #ffffff;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html,
+body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "SF Pro Display",
+        "Segoe UI",
+        sans-serif;
+
+    color: white;
+}
+
+body {
+    background: #111;
+}
+
+
+/* =========================================================
+   WALLPAPER (ÂNGULO 0 DEGREES)
+   ========================================================= */
+
+#wallpaper {
+    position: fixed;
+    width: 100vw;
+    height: 100vh;
+    left: 50%;
+    top: 50%;
+    transform:
+        translate(-50%, -50%)
+        rotate(0deg);
+    transform-origin: center center;
+    background-position: center;
+    background-size: cover;
+    background-repeat: no-repeat;
+    background-color: #000;
+    z-index: -3;
+    transition:
+        background-image 10s ease;
+}
+
+#wallpaper::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+        rgba(0, 0, 0, 0.12);
+}
+
+
+/* =========================================================
+   OVERLAY
+   ========================================================= */
+
+.overlay {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background:
+        rgba(0, 0, 0, 0.08);
+    z-index: -2;
+}
+
+
+/* =========================================================
+   APP
+   ========================================================= */
+
+.app {
+    width: 100%;
+    height: 100%;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    position: relative;
+}
+
+
+/* =========================================================
+   TOPO
+   ========================================================= */
+
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.title-area {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.logo {
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+        rgba(255,255,255,.16);
+    border:
+        1px solid rgba(255,255,255,.2);
+    backdrop-filter:
+        blur(20px);
+    -webkit-backdrop-filter:
+        blur(20px);
+    font-size: 20px;
+}
+
+.title {
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -.5px;
+}
+
+.top-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.icon-btn {
+    width: 42px;
+    height: 42px;
+    border:
+        1px solid rgba(255,255,255,.18);
+    border-radius: 14px;
+    background:
+        rgba(255,255,255,.12);
+    color: white;
+    cursor: pointer;
+    backdrop-filter:
+        blur(20px);
+    -webkit-backdrop-filter:
+        blur(20px);
+    font-size: 18px;
+    transition: .2s;
+}
+
+.icon-btn:hover {
+    background:
+        rgba(255,255,255,.22);
+    transform:
+        scale(1.04);
+}
+
+
+/* =========================================================
+   RELÓGIO ESTILO iOS
+   ========================================================= */
+
+.ios-clock-widget {
+    align-self: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: calc(12px * var(--clock-scale)) calc(30px * var(--clock-scale));
+    border-radius: calc(20px * var(--clock-scale));
+    background: rgba(255, 255, 255, 0.11);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+    transform: scale(var(--clock-scale));
+    transform-origin: center center;
+    transition: transform 0.2s ease, padding 0.2s ease, color 0.3s ease;
+}
+
+.ios-clock-time {
+    font-size: calc(38px * var(--clock-scale));
+    font-weight: 700;
+    letter-spacing: -1px;
+    line-height: 1;
+    color: var(--accent-color);
+    text-shadow: 0 2px 10px rgba(0,0,0,0.3);
+    transition: color 0.3s ease;
+}
+
+.ios-clock-date {
+    font-size: calc(13px * var(--clock-scale));
+    font-weight: 500;
+    opacity: 0.9;
+    color: var(--accent-color);
+    text-transform: capitalize;
+    margin-top: calc(4px * var(--clock-scale));
+    letter-spacing: 0.2px;
+    transition: color 0.3s ease;
+}
+
+
+/* =========================================================
+   CARDS & ESCALONAMENTO DE TAMANHO
+   ========================================================= */
+
+.cards {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: calc(18px * var(--card-scale));
+    min-height: 0;
+    align-items: center;
+}
+
+.card {
+    min-height: 0;
+    border-radius: calc(28px * var(--card-scale));
+    padding: calc(22px * var(--card-scale));
+    background: rgba(255,255,255,.11);
+    border: 1px solid rgba(255,255,255,.18);
+    box-shadow:
+        0 20px 50px rgba(0,0,0,.22),
+        inset 0 1px 0 rgba(255,255,255,.08);
+    backdrop-filter: blur(24px) saturate(140%);
+    -webkit-backdrop-filter: blur(24px) saturate(140%);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    overflow: hidden;
+    transform: scale(var(--card-scale));
+    transform-origin: center center;
+    transition: transform 0.2s ease, padding 0.2s ease, border-radius 0.2s ease;
+}
+
+.card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.card-name {
+    font-size: calc(15px * var(--card-scale));
+    font-weight: 600;
+    opacity: .85;
+}
+
+.card-status {
+    width: calc(8px * var(--card-scale));
+    height: calc(8px * var(--card-scale));
+    border-radius: 50%;
+    background: #55e68a;
+    box-shadow: 0 0 12px #55e68a;
+}
+
+
+/* =========================================================
+   GAUGE COM COR CUSTOMIZADA
+   ========================================================= */
+
+.gauge-area {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex: 1;
+}
+
+.gauge {
+    position: relative;
+    width: calc(min(18vw, 190px) * var(--card-scale));
+    height: calc(min(18vw, 190px) * var(--card-scale));
+}
+
+.gauge svg {
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+}
+
+.gauge-bg {
+    fill: none;
+    stroke: rgba(255,255,255,.12);
+    stroke-width: 9;
+}
+
+.gauge-progress {
+    fill: none;
+    stroke: var(--accent-color);
+    stroke-width: 9;
+    stroke-linecap: round;
+    transition: stroke-dashoffset .5s ease, stroke .3s ease;
+    filter: drop-shadow(0 0 7px var(--accent-color));
+}
+
+.gauge-center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.gauge-value {
+    font-size: calc(clamp(28px, 4vw, 46px) * var(--card-scale));
+    font-weight: 700;
+    letter-spacing: -2px;
+    color: var(--accent-color);
+    transition: color .3s ease;
+}
+
+.gauge-label {
+    font-size: calc(12px * var(--card-scale));
+    opacity: .55;
+    margin-top: 3px;
+}
+
+
+/* =========================================================
+   RODAPÉ DOS CARDS E ASSINATURA
+   ========================================================= */
+
+.card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+}
+
+.temp {
+    font-size: calc(14px * var(--card-scale));
+    opacity: .75;
+}
+
+.temp strong {
+    font-size: calc(20px * var(--card-scale));
+    opacity: 1;
+    color: var(--accent-color);
+    transition: color .3s ease;
+}
+
+.graph {
+    width: 45%;
+    height: calc(45px * var(--card-scale));
+}
+
+.graph svg {
+    width: 100%;
+    height: 100%;
+}
+
+.graph-line {
+    fill: none;
+    stroke: var(--accent-color);
+    stroke-width: 2;
+    stroke-linecap: round;
+    transition: stroke .3s ease;
+}
+
+/* Assinatura no Centro do Rodapé */
+.footer-signature {
+    text-align: center;
+    font-size: 11px;
+    font-weight: 500;
+    opacity: 0.55;
+    letter-spacing: 0.6px;
+    padding-bottom: 2px;
+    text-transform: uppercase;
+}
+
+
+/* =========================================================
+   CONFIGURAÇÕES
+   ========================================================= */
+
+.settings {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    width: min(360px, calc(100% - 40px));
+    max-height: calc(100vh - 40px);
+    overflow-y: auto;
+    padding: 22px;
+    border-radius: 26px;
+    background: rgba(25,25,25,.85);
+    border: 1px solid rgba(255,255,255,.18);
+    backdrop-filter: blur(30px);
+    -webkit-backdrop-filter: blur(30px);
+    box-shadow: 0 25px 70px rgba(0,0,0,.45);
+    transform: translateX(120%);
+    transition: .35s ease;
+    z-index: 10;
+}
+
+.settings.open {
+    transform: translateX(0);
+}
+
+.settings-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+}
+
+.settings-title {
+    font-size: 19px;
+    font-weight: 700;
+}
+
+.close {
+    background: rgba(255,255,255,.1);
+    color: white;
+    border: 0;
+    width: 34px;
+    height: 34px;
+    border-radius: 11px;
+    cursor: pointer;
+    font-size: 18px;
+}
+
+.setting {
+    margin-bottom: 22px;
+}
+
+.setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.setting-title {
+    font-size: 13px;
+    opacity: .65;
+    margin-bottom: 10px;
+}
+
+.setting-row .setting-title {
+    margin-bottom: 0;
+}
+
+.color-picker-container {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.color-picker-container input[type="color"] {
+    -webkit-appearance: none;
+    border: none;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    cursor: pointer;
+    background: none;
+}
+
+.color-picker-container input[type="color"]::-webkit-color-swatch-wrapper {
+    padding: 0;
+}
+
+.color-picker-container input[type="color"]::-webkit-color-swatch {
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-radius: 50%;
+}
+
+.color-value {
+    font-size: 14px;
+    font-weight: 600;
+    font-mono: monospace;
+    opacity: 0.9;
+}
+
+/* CONTROLES DE TIMEOUT E TOGGLE */
+.custom-select {
+    background: rgba(255, 255, 255, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: white;
+    padding: 6px 12px;
+    border-radius: 10px;
+    font-size: 13px;
+    outline: none;
+    cursor: pointer;
+}
+
+.custom-select option {
+    background: #222;
+    color: white;
+}
+
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 24px;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background-color: rgba(255, 255, 255, 0.2);
+    transition: .3s;
+    border-radius: 24px;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: .3s;
+    border-radius: 50%;
+}
+
+input:checked + .slider {
+    background-color: #55e68a;
+}
+
+input:checked + .slider:before {
+    transform: translateX(20px);
+}
+
+.wallpapers {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+}
+
+.wallpaper-btn {
+    height: 70px;
+    border-radius: 14px;
+    border: 2px solid transparent;
+    background-position: center;
+    background-size: cover;
+    cursor: pointer;
+    overflow: hidden;
+}
+
+.wallpaper-btn.active {
+    border-color: white;
+}
+
+input[type="range"] {
+    width: 100%;
+    accent-color: white;
+}
+
+
+/* =========================================================
+   PAUSADO
+   ========================================================= */
+
+.paused {
+    opacity: .55;
+}
+
+
+/* =========================================================
+   RESPONSIVO
+   ========================================================= */
+
+@media (max-width: 800px) {
+    html,
+    body {
+        overflow-y: auto;
+    }
+
+    .app {
+        min-height: 100%;
+        height: auto;
+        padding: 14px;
+    }
+
+    .cards {
+        grid-template-columns: 1fr;
+    }
+
+    .card {
+        min-height: 260px;
+    }
+
+    .gauge {
+        width: 150px;
+        height: 150px;
+    }
+}
+
+@media (orientation: landscape) and (max-height: 600px) {
+    .app {
+        padding: 12px;
+        gap: 10px;
+    }
+
+    .cards {
+        gap: 10px;
+    }
+
+    .card {
+        padding: 14px;
+        border-radius: 20px;
+    }
+
+    .gauge {
+        width: 120px;
+        height: 120px;
+    }
+
+    .title {
+        font-size: 19px;
+    }
+
+    .logo,
+    .icon-btn {
+        width: 36px;
+        height: 36px;
+    }
+}
+
+</style>
+</head>
+
+
+<body>
+
+<!-- WALLPAPER -->
+<div id="wallpaper"></div>
+<div class="overlay"></div>
+
+<div class="app" id="app">
+
+    <!-- TOPO -->
+    <header class="topbar">
+        <div class="title-area">
+            <div class="logo">🖥</div>
+            <div class="title">Monitoramento</div>
+        </div>
+
+        <div class="top-actions">
+            <button class="icon-btn" id="pauseBtn" title="Pausar">⏸</button>
+            <button class="icon-btn" id="settingsBtn" title="Configurações">⚙</button>
+        </div>
+    </header>
+
+    <!-- RELÓGIO ESTILO iOS -->
+    <div class="ios-clock-widget">
+        <div class="ios-clock-time" id="clockTime">00:00:00</div>
+        <div class="ios-clock-date" id="clockDate">Carregando data...</div>
+    </div>
+
+    <!-- CARDS -->
+    <main class="cards">
+
+        <!-- CPU -->
+        <section class="card">
+            <div class="card-header">
+                <span class="card-name">CPU</span>
+                <span class="card-status"></span>
+            </div>
+
+            <div class="gauge-area">
+                <div class="gauge">
+                    <svg viewBox="0 0 120 120">
+                        <circle class="gauge-bg" cx="60" cy="60" r="50"></circle>
+                        <circle id="cpuProgress" class="gauge-progress" cx="60" cy="60" r="50"></circle>
+                    </svg>
+
+                    <div class="gauge-center">
+                        <div id="cpuValue" class="gauge-value">--%</div>
+                        <div class="gauge-label">utilização</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-footer">
+                <div class="temp">
+                    <span>Temperatura</span><br>
+                    <strong id="cpuTemp">--°C</strong>
+                </div>
+
+                <div class="graph">
+                    <svg viewBox="0 0 200 50">
+                        <polyline id="cpuGraph" class="graph-line" points=""></polyline>
+                    </svg>
+                </div>
+            </div>
+        </section>
+
+        <!-- GPU -->
+        <section class="card">
+            <div class="card-header">
+                <span class="card-name">GPU</span>
+                <span class="card-status"></span>
+            </div>
+
+            <div class="gauge-area">
+                <div class="gauge">
+                    <svg viewBox="0 0 120 120">
+                        <circle class="gauge-bg" cx="60" cy="60" r="50"></circle>
+                        <circle id="gpuProgress" class="gauge-progress" cx="60" cy="60" r="50"></circle>
+                    </svg>
+
+                    <div class="gauge-center">
+                        <div id="gpuValue" class="gauge-value">--%</div>
+                        <div class="gauge-label">utilização</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-footer">
+                <div class="temp">
+                    <span>Temperatura</span><br>
+                    <strong id="gpuTemp">--°C</strong>
+                </div>
+
+                <div class="graph">
+                    <svg viewBox="0 0 200 50">
+                        <polyline id="gpuGraph" class="graph-line" points=""></polyline>
+                    </svg>
+                </div>
+            </div>
+        </section>
+
+        <!-- RAM -->
+        <section class="card">
+            <div class="card-header">
+                <span class="card-name">Memória RAM</span>
+                <span class="card-status"></span>
+            </div>
+
+            <div class="gauge-area">
+                <div class="gauge">
+                    <svg viewBox="0 0 120 120">
+                        <circle class="gauge-bg" cx="60" cy="60" r="50"></circle>
+                        <circle id="ramProgress" class="gauge-progress" cx="60" cy="60" r="50"></circle>
+                    </svg>
+
+                    <div class="gauge-center">
+                        <div id="ramValue" class="gauge-value">--%</div>
+                        <div class="gauge-label">utilização</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-footer">
+                <div class="temp">
+                    <span>Memória</span><br>
+                    <strong id="ramInfo">--%</strong>
+                </div>
+
+                <div class="graph">
+                    <svg viewBox="0 0 200 50">
+                        <polyline id="ramGraph" class="graph-line" points=""></polyline>
+                    </svg>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- ASSINATURA RODAPÉ -->
+    <footer class="footer-signature">
+        Done MestreKadu
+    </footer>
+
+</div>
+
+<!-- CONFIGURAÇÕES -->
+<div class="settings" id="settings">
+
+    <div class="settings-header">
+        <div class="settings-title">Configurações</div>
+        <button class="close" id="closeSettings">×</button>
+    </div>
+
+    <!-- COR DO MONITORAMENTO -->
+    <div class="setting">
+        <div class="setting-title">Cor do Monitoramento</div>
+        <div class="color-picker-container">
+            <input type="color" id="accentColorPicker" value="#00ffcc">
+            <span class="color-value" id="colorCode">#00ffcc</span>
+        </div>
+    </div>
+
+    <!-- TAMANHO DO RELÓGIO -->
+    <div class="setting">
+        <div class="setting-title">Tamanho do Relógio</div>
+        <input type="range" id="clockScale" min="0.7" max="1.6" step="0.05" value="1">
+    </div>
+
+    <!-- TAMANHO DOS CARDS -->
+    <div class="setting">
+        <div class="setting-title">Tamanho do Monitor</div>
+        <input type="range" id="cardScale" min="0.5" max="1" step="0.05" value="0.75">
+    </div>
+
+    <!-- TRANSPARÊNCIA -->
+    <div class="setting">
+        <div class="setting-title">Transparência</div>
+        <input type="range" id="transparency" min="5" max="25" value="11">
+    </div>
+
+    <!-- PASSAGEM AUTOMÁTICA DOS WALLPAPERS -->
+    <div class="setting setting-row">
+        <div class="setting-title">Passagem Automática</div>
+        <label class="switch">
+            <input type="checkbox" id="autoWallpaperToggle" checked>
+            <span class="slider"></span>
+        </label>
+    </div>
+
+    <!-- TEMPO DE TROCA -->
+    <div class="setting setting-row" id="wallpaperTimerContainer">
+        <div class="setting-title">Tempo de Troca</div>
+        <select id="wallpaperInterval" class="custom-select">
+            <option value="5000">5 segundos</option>
+            <option value="10000" selected>10 segundos</option>
+            <option value="30000">30 segundos</option>
+            <option value="60000">1 minuto</option>
+            <option value="300000">5 minutos</option>
+        </select>
+    </div>
+
+    <!-- WALLPAPERS -->
+    <div class="setting">
+        <div class="setting-title">Wallpaper</div>
+        <div class="wallpapers" id="wallpapers">Carregando...</div>
+    </div>
+
+</div>
+
+<script>
+
+/* =========================================================
+   RELÓGIO COM DATA ESTILO iOS
+   ========================================================= */
+
+function atualizarRelogio() {
+    const agora = new Date();
+    
+    const horas = String(agora.getHours()).padStart(2, '0');
+    const minutos = String(agora.getMinutes()).padStart(2, '0');
+    const segundos = String(agora.getSeconds()).padStart(2, '0');
+    document.getElementById("clockTime").textContent = `${horas}:${minutos}:${segundos}`;
+
+    const opcoesData = { weekday: 'long', day: 'numeric', month: 'long' };
+    const dataFormatada = agora.toLocaleDateString('pt-BR', opcoesData);
+    document.getElementById("clockDate").textContent = dataFormatada;
+}
+
+setInterval(atualizarRelogio, 1000);
+atualizarRelogio();
+
+
+/* =========================================================
+   CONTROLES DE TAMANHO (CARDS E RELÓGIO)
+   ========================================================= */
+
+const cardScaleInput = document.getElementById("cardScale");
+document.documentElement.style.setProperty('--card-scale', cardScaleInput.value);
+
+cardScaleInput.addEventListener("input", (e) => {
+    document.documentElement.style.setProperty('--card-scale', e.target.value);
+});
+
+const clockScaleInput = document.getElementById("clockScale");
+document.documentElement.style.setProperty('--clock-scale', clockScaleInput.value);
+
+clockScaleInput.addEventListener("input", (e) => {
+    document.documentElement.style.setProperty('--clock-scale', e.target.value);
+});
+
+
+/* =========================================================
+   SELETOR DE COR DO MONITORAMENTO
+   ========================================================= */
+
+const colorPicker = document.getElementById("accentColorPicker");
+const colorCode = document.getElementById("colorCode");
+
+document.documentElement.style.setProperty('--accent-color', colorPicker.value);
+
+colorPicker.addEventListener("input", (e) => {
+    const novaCor = e.target.value;
+    document.documentElement.style.setProperty('--accent-color', novaCor);
+    colorCode.textContent = novaCor;
+});
+
+
+/* =========================================================
+   GAUGES
+   ========================================================= */
+
+const circumference = 2 * Math.PI * 50;
+const cpuProgress = document.getElementById("cpuProgress");
+const gpuProgress = document.getElementById("gpuProgress");
+const ramProgress = document.getElementById("ramProgress");
+
+cpuProgress.style.strokeDasharray = circumference;
+gpuProgress.style.strokeDasharray = circumference;
+ramProgress.style.strokeDasharray = circumference;
+
+function setGauge(element, value) {
+    if (value === null || value === undefined) {
+        element.style.strokeDashoffset = circumference;
+        return;
+    }
+
+    value = Math.max(0, Math.min(100, Number(value)));
+    const offset = circumference - (value / 100) * circumference;
+    element.style.strokeDashoffset = offset;
+}
+
+
+/* =========================================================
+   TEXTOS
+   ========================================================= */
+
+function updateText(id, value, suffix = "") {
+    const element = document.getElementById(id);
+    if (value === null || value === undefined) {
+        element.textContent = "--" + suffix;
+    } else {
+        element.textContent = value + suffix;
+    }
+}
+
+
+/* =========================================================
+   GRÁFICOS
+   ========================================================= */
+
+const history = { cpu: [], gpu: [], ram: [] };
+const maxHistory = 30;
+
+function addHistory(type, value) {
+    if (value === null || value === undefined) return;
+
+    history[type].push(Number(value));
+
+    if (history[type].length > maxHistory) {
+        history[type].shift();
+    }
+
+    drawGraph(type);
+}
+
+function drawGraph(type) {
+    const values = history[type];
+    if (values.length < 2) return;
+
+    const points = [];
+    values.forEach((value, index) => {
+        const x = (index / (maxHistory - 1)) * 200;
+        const y = 48 - (value / 100) * 44;
+        points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    });
+
+    document.getElementById(type + "Graph").setAttribute("points", points.join(" "));
+}
+
+
+/* =========================================================
+   WEBSOCKET
+   ========================================================= */
+
+let ws = null;
+let paused = false;
+
+function conectar() {
+    const protocolo = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${protocolo}//${location.host}`);
+
+    ws.onopen = () => {
+        console.log("WebSocket conectado.");
+    };
+
+    ws.onclose = () => {
+        console.log("WebSocket desconectado.");
+        setTimeout(conectar, 2000);
+    };
+
+    ws.onerror = () => {
+        console.log("Erro na conexão WebSocket.");
+    };
+
+    ws.onmessage = (event) => {
+        if (paused) return;
+
+        try {
+            const dados = JSON.parse(event.data);
+
+            updateText("cpuValue", dados.cpu, "%");
+            updateText("gpuValue", dados.gpu, "%");
+            updateText("ramValue", dados.ram, "%");
+
+            updateText("cpuTemp", dados.cpuTemp, "°C");
+            updateText("gpuTemp", dados.gpuTemp, "°C");
+            updateText("ramInfo", dados.ram, "%");
+
+            setGauge(cpuProgress, dados.cpu);
+            setGauge(gpuProgress, dados.gpu);
+            setGauge(ramProgress, dados.ram);
+
+            addHistory("cpu", dados.cpu);
+            addHistory("gpu", dados.gpu);
+            addHistory("ram", dados.ram);
+        } catch (erro) {
+            console.log("Erro nos dados:", erro);
+        }
+    };
+}
+
+conectar();
+
+
+/* =========================================================
+   PAUSAR
+   ========================================================= */
+
+document.getElementById("pauseBtn").addEventListener("click", () => {
+    paused = !paused;
+    document.getElementById("pauseBtn").textContent = paused ? "▶" : "⏸";
+    document.getElementById("app").classList.toggle("paused", paused);
+});
+
+
+/* =========================================================
+   CONFIGURAÇÕES
+   ========================================================= */
+
+const settings = document.getElementById("settings");
+
+document.getElementById("settingsBtn").addEventListener("click", () => {
+    settings.classList.add("open");
+});
+
+document.getElementById("closeSettings").addEventListener("click", () => {
+    settings.classList.remove("open");
+});
+
+
+/* =========================================================
+   TRANSPARÊNCIA (SINCRONIZADA COM CARDS E RELÓGIO)
+   ========================================================= */
+
+document.getElementById("transparency").addEventListener("input", (event) => {
+    const valor = Number(event.target.value) / 100;
+    document.querySelectorAll(".card, .ios-clock-widget").forEach(element => {
+        element.style.background = `rgba(255,255,255,${valor})`;
+    });
+});
+
+
+/* =========================================================
+   WALLPAPERS E CONTROLE DE TEMPO DE TROCA AUTOMÁTICA
+   ========================================================= */
+
+let wallpapers = [];
+let wallpaperAtual = 0;
+let wallpaperTimer = null;
+let autoWallpaperActive = true;
+let wallpaperTempoMs = 10000; // Padrão: 10s
+
+async function carregarWallpapers() {
+    try {
+        const resposta = await fetch("/api/wallpapers");
+        wallpapers = await resposta.json();
+
+        const container = document.getElementById("wallpapers");
+        container.innerHTML = "";
+
+        wallpapers.forEach((arquivo, index) => {
+            const botao = document.createElement("button");
+            botao.className = "wallpaper-btn";
+            botao.style.backgroundImage = `url("/wallpapers/${encodeURIComponent(arquivo)}")`;
+            botao.title = "Selecionar wallpaper";
+
+            botao.addEventListener("click", () => {
+                mudarWallpaper(index);
+                reiniciarTimerWallpaper(); // Reinicia o tempo ao trocar manualmente
+            });
+
+            container.appendChild(botao);
+        });
+
+        if (wallpapers.length > 0) {
+            mudarWallpaper(0);
+            iniciarTimerWallpaper();
+        }
+    } catch (erro) {
+        document.getElementById("wallpapers").textContent = "Não foi possível carregar.";
+        console.log("Erro nos wallpapers:", erro);
+    }
+}
+
+function mudarWallpaper(index) {
+    if (!wallpapers.length) return;
+    wallpaperAtual = index;
+    const arquivo = wallpapers[index];
+
+    document.getElementById("wallpaper").style.backgroundImage = `url("/wallpapers/${encodeURIComponent(arquivo)}")`;
+
+    document.querySelectorAll(".wallpaper-btn").forEach((botao, i) => {
+        botao.classList.toggle("active", i === index);
+    });
+}
+
+function proximoWallpaper() {
+    if (wallpapers.length <= 1 || paused || !autoWallpaperActive) return;
+    wallpaperAtual = (wallpaperAtual + 1) % wallpapers.length;
+    mudarWallpaper(wallpaperAtual);
+}
+
+function iniciarTimerWallpaper() {
+    pararTimerWallpaper();
+    if (autoWallpaperActive) {
+        wallpaperTimer = setInterval(proximoWallpaper, wallpaperTempoMs);
+    }
+}
+
+function pararTimerWallpaper() {
+    if (wallpaperTimer) {
+        clearInterval(wallpaperTimer);
+        wallpaperTimer = null;
+    }
+}
+
+function reiniciarTimerWallpaper() {
+    pararTimerWallpaper();
+    iniciarTimerWallpaper();
+}
+
+// Eventos dos Controles
+const autoToggle = document.getElementById("autoWallpaperToggle");
+const intervalSelect = document.getElementById("wallpaperInterval");
+
+autoToggle.addEventListener("change", (e) => {
+    autoWallpaperActive = e.target.checked;
+    intervalSelect.disabled = !autoWallpaperActive;
+    if (autoWallpaperActive) {
+        iniciarTimerWallpaper();
+    } else {
+        pararTimerWallpaper();
+    }
+});
+
+intervalSelect.addEventListener("change", (e) => {
+    wallpaperTempoMs = Number(e.target.value);
+    reiniciarTimerWallpaper();
+});
+
+
+/* =========================================================
+   INICIAR
+   ========================================================= */
+
+carregarWallpapers();
+
+</script>
+</body>
+</html>
